@@ -1,31 +1,41 @@
 package com.example.leaf_disease_detection;
 
-import androidx.annotation.Nullable;
-import androidx.appcompat.app.AppCompatActivity;
-import androidx.core.app.ActivityCompat;
-import androidx.core.content.ContextCompat;
-import androidx.core.content.FileProvider;
-
-import android.Manifest;
 import android.app.Activity;
 import android.content.Intent;
-import android.content.pm.PackageManager;
-import android.database.Cursor;
+import android.content.res.AssetFileDescriptor;
 import android.graphics.Bitmap;
-import android.graphics.BitmapFactory;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.MediaStore;
+import android.renderscript.ScriptGroup;
 import android.view.View;
 import android.widget.Button;
 import android.widget.ImageView;
+import android.widget.TextView;
+
+import androidx.annotation.Nullable;
+import androidx.appcompat.app.AppCompatActivity;
+
+import org.datavec.image.loader.NativeImageLoader;
+import org.tensorflow.lite.Interpreter;
 
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileNotFoundException;
-import java.io.InputStream;
+import java.io.IOException;
+import java.nio.MappedByteBuffer;
+import java.nio.channels.FileChannel;
+
+
+
+//Dataset --> keras --> .h5
+//data --> farmers-image(Validation set) -    (Trianed_model).h5 -->disease_name+remedy
+
+
 
 public class MainActivity extends AppCompatActivity {
+    private static int RESULT_LOAD_IMAGE = 1;
 
     Button btnSelect;
     Button btnSelect2;
@@ -35,94 +45,114 @@ public class MainActivity extends AppCompatActivity {
     private Uri uri;
     private String stringPath;
     private Intent iData;
-
+    Interpreter tflite;
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
-        btnSelect = findViewById(R.id.btnSelect);
+        Button btnSelect = (Button) findViewById(R.id.btnSelect);
+
+        Button detectButton = (Button) findViewById(R.id.btnSelect2);
+        TextView res = (TextView)findViewById(R.id.result_text);
         img = findViewById(R.id.imgs);
+
+        tflite = new Interpreter(loadModelFile(activity));
+
+
+
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            requestPermissions(new String[]{android.Manifest.permission.READ_EXTERNAL_STORAGE}, 1);
+        }
 
         btnSelect.setOnClickListener(new View.OnClickListener() {
             public void onClick(View view) {
-                if (ContextCompat.checkSelfPermission(getApplicationContext(), Manifest.permission.READ_EXTERNAL_STORAGE)
-                        != PackageManager.PERMISSION_GRANTED) {
-                    ActivityCompat.requestPermissions(MainActivity.this, new String[]{Manifest.permission.READ_EXTERNAL_STORAGE}, REQUEST_STORAGE);
-                } else {
-                    SelectImage();
-                }
+
+                Intent i = new Intent(Intent.ACTION_PICK);
+                i.setType("image/*");
+                i.setAction(Intent.ACTION_GET_CONTENT);
+                startActivityForResult(Intent.createChooser(i,"Select Picture"),RESULT_LOAD_IMAGE);
+
             }
         });
-        img.setOnClickListener(new View.OnClickListener() {
+
+        try {
+            tflite = new Interpreter(loadModelFile());
+        } catch(Exception e){
+            e.printStackTrace();
+        }
+        detectButton.setOnClickListener(new View.OnClickListener() {
             public void onClick(View view) {
-                if (checkReadStorageAllowed()) {
-                    File imgFile = new File(stringPath);
-                    if (imgFile.exists()) {
-                        Uri uri;
-                        uri = FileProvider.getUriForFile(MainActivity.this, MainActivity.this.getPackageName() + "." + BuildConfig.APPLICATION_ID + ".provider", imgFile);
+                float prediction = inference(ScriptGroup.Input.getText().toString());
+                res.setText(Float.toString(prediction));
 
-                        Intent intent = new Intent();
-                        intent.setAction(Intent.ACTION_VIEW);
-                        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-                        intent.setDataAndType(uri, "image/*");
-                        MainActivity.this.startActivity(intent);
-                    }
-                } else {
-                    ActivityCompat.requestPermissions((Activity) MainActivity.this, new String[]{"android.permission.WRITE_EXTERNAL_STORAGE"}, REQUEST_STORAGE);
-                }
             }
         });
 
+
     }
 
-    private void SelectImage() {
-        Intent intent = new Intent(Intent.ACTION_PICK, android.provider.MediaStore.Images.Media.INTERNAL_CONTENT_URI);
-        startActivityForResult(intent,REQUEST_FILE);
+    public NativeImageLoader(long height, long width, long channels) {
+        this.height = height;
+        this.width = width;
+        this.channels = channels;
     }
+    public float inference(String s) {
+        int height = 224;
+        int width = 224;
+        int channels = 3;
+
+        String absolutePath;
+        File f = new File(absolutePath,img);
+        NativeImageLoader loader = new NativeImageLoader(height, width, channels);
+
+        float [] inputValue = new float[1];
+        inputValue[0] = Float.valueOf(s);
+
+        float[][] outputValue = new float[1][1];
+        tflite.run(inputValue,outputValue);
+        float inferenceValue = outputValue[0][0];
+        return inferenceValue;
+    }
+
+
+
+
+
 
     @Override
     protected void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
 
-        if(requestCode == REQUEST_FILE && resultCode == RESULT_OK){
-            if(data != null){
+        if(requestCode == RESULT_LOAD_IMAGE && resultCode == RESULT_OK && data != null && data.getData() != null){
                 uri = data.getData();
-                iData = data;
-                getStringPath(uri);
+
                 try{
-                InputStream inputStream = getContentResolver().openInputStream(uri);
-                    Bitmap bitmap = BitmapFactory.decodeStream(inputStream);
+                    Bitmap bitmap = MediaStore.Images.Media.getBitmap(getContentResolver(),uri);
                     img.setImageBitmap(bitmap);
             }catch (FileNotFoundException e){
                     e.printStackTrace();
-                }
+                } catch (IOException e) {
+                    e.printStackTrace();
         }
     }
 }
 
-    private String getStringPath(Uri myUri){
-        String[] filePathColumn = {android.provider.MediaStore.Images.Media.DATA};
-        Cursor cursor = getContentResolver().query(myUri,filePathColumn,null,null,null);
-        if(cursor == null ){
-            stringPath = myUri.getPath();
+    private MappedByteBuffer loadModelFile(Activity activity) throws IOException {
+        AssetFileDescriptor fileDescriptor = activity.getAssets().openFd(getModelPath());
 
-        }else{
-            cursor.moveToFirst();
-            int columnIndex = cursor.getColumnIndex(filePathColumn[0]);
-            stringPath = cursor.getString(columnIndex);
-            cursor.close();
-        }
-        return stringPath;
+
+        FileInputStream inputStream = new  FileInputStream(fileDescriptor.getFileDescriptor());
+        FileChannel fileChannel = inputStream.getChannel();
+        long startOffset = fileDescriptor.getStartOffset();
+        long declaredLength = fileDescriptor.getDeclaredLength();
+        return fileChannel.map(FileChannel.MapMode.READ_ONLY, startOffset, declaredLength);
     }
 
-    public boolean checkReadStorageAllowed() {
-        if(Build.VERSION.SDK_INT < 23 || ContextCompat.checkSelfPermission(MainActivity.this, "android.permission.WRITE_EXTERNAL_STORAGE") == 0) {
-            return true;
-        }
-        return false;
+    private String getModelPath() {
 
+        return "model_inception.tflite";
     }
-
 
 
 }
